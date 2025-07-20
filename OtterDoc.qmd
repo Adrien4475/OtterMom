@@ -4,6 +4,17 @@ format: html
 editor: visual
 ---
 
-## 
+Downloading the data!
 
-hello!
+```{r}
+#Libraries:
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(lme4)
+library(cowplot)
+library(car)
+library(ggeffects)
+
+otterdat <- read_csv(here::here("data/mompupdata_all.xlsx - Sheet1.csv"))
+```
