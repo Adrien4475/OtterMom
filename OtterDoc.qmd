@@ -384,5 +384,5 @@ ggplot() +
     axis.title = element_text(face = "bold", size = 13),
     plot.title = element_text(face = "italic", hjust = 0.5, size = 16)
     )
-  )
+  
 ```
