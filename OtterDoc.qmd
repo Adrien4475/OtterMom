@@ -123,7 +123,7 @@ otterdat2 <- otterdat %>%
     # Mom age group
     mom_age_group = case_when(
       mom_age < 4 ~ "young",
-      mom_age >= 4 & mom_age <= 8 ~ "prime",
+      mom_age >= 1 & mom_age <= 8 ~ "prime",
       mom_age > 8 ~ "old",
       TRUE ~ NA_character_
     ),
@@ -139,6 +139,21 @@ otterdat2 <- otterdat %>%
     sex_bin = ifelse(SEX == "m", 1, 0)
   ) %>%
    filter(!is.na(mom_age_group), !is.na(SEX), !is.na(wean_success), !is.na(mom_age), !is.na(pupbday))
+
+otterdat2 <- otterdat2 %>%
+  mutate(
+    pupbday   = if (!inherits(pupbday, "Date")) as.Date(pupbday) else pupbday,
+    last_date = if (!inherits(Last_date, "Date")) as.Date(Last_date) else Last_date,
+    wean_days = as.numeric(Last_date - pupbday, units = "days"),
+    mom_age_group = case_when(
+      mom_age < 4 ~ "young",
+      mom_age >= 4 & mom_age <= 8 ~ "prime",
+      mom_age > 8 ~ "old",
+      TRUE ~ NA_character_
+    ),
+    mom_age_group = factor(mom_age_group, levels = c("young", "prime", "old"))
+  ) %>%
+  filter(!is.na(wean_days), wean_days >= 0, wean_days <= 365)
 ```
 
 Now that our data is all organized we can create our models
@@ -146,8 +161,9 @@ Now that our data is all organized we can create our models
 For our first question: Does mom's age group/class affect weaning success?
 
 ```{r}
+# Model
 age_mod <- glmer(
-  wean_success ~ mom_age_group + (1 | Otterno) + (1 | year),
+  wean_success ~ mom_age + mom_age_group + (1 | Otterno) + (1 | year),
   data = otterdat2,
   family = binomial,
   control = glmerControl(optimizer = "bobyqa")
@@ -155,234 +171,282 @@ age_mod <- glmer(
 
 summary(age_mod)
 
-#After, create a customprediction grid:
+# Build prediction grid across full age range
 wean_grid <- expand_grid(
-  mom_age_group = factor(c("young", "prime", "old"), levels = c("young", "prime", "old")))
-  
-#Then create a prediction for population levels
-wean_pred <- wean_grid %>%
-  mutate(predicted = predict(
-    age_mod,
-    newdata = wean_grid,
-    re.form = NA,
-    type = "response"
-  ))
+  mom_age = seq(min(otterdat2$mom_age, na.rm = TRUE),
+                max(otterdat2$mom_age, na.rm = TRUE),
+                by = 1)
+) %>%
+  mutate(
+    mom_age_group = case_when(
+      mom_age < 4 ~ "young",
+      mom_age >= 4 & mom_age <= 8 ~ "prime",
+      mom_age > 8 ~ "old",
+      TRUE ~ NA_character_
+    ),
+    mom_age_group = factor(mom_age_group, levels = c("young", "prime", "old"))
+  )
 
-#Add CI
-wean_pred_ci <- ggpredict(age_mod, terms = "mom_age_group") %>% as.data.frame()
+# Predictions with CI
+wean_pred_ci <- ggpredict(age_mod, terms = c("mom_age [all]", "mom_age_group")) %>%
+  as.data.frame() %>%
+  mutate(
+    mom_age_group = factor(group, levels = c("young", "prime", "old")),
+    mom_age = as.numeric(x)
+  ) %>%
+  # Restrict predictions to valid ranges
+  filter(
+    (mom_age_group == "young" & mom_age < 4) |
+    (mom_age_group == "prime" & mom_age >= 4 & mom_age <= 8) |
+    (mom_age_group == "old" & mom_age > 8)
+  )
 
-#Then create a summary for the data:
+# Observed summaries
 wean_summ <- otterdat2 %>%
-  group_by(mom_age_group) %>%
+  group_by(mom_age, mom_age_group) %>%
   summarise(
     mean_success = mean(wean_success, na.rm = TRUE),
     se_success = sd(wean_success, na.rm = TRUE) / sqrt(n()),
     .groups = "drop"
-  )
+  ) %>%
+  mutate(mom_age = mom_age + 0.2 * ifelse(mom_age_group == "prime",
+                                          0, ifelse(mom_age_group == "young", -1, 1)))
 
-#Add some jitter:
-wean_summ <- wean_summ %>%
-  mutate(x_jitter = as.numeric(mom_age_group) + 0.1)
-
-#fix a problem:
-wean_pred_ci$x <- factor(c("young", "prime", "old"), levels = levels(wean_summ$mom_age_group))
-
-#Now we can hopefully graph this! 
-
-#Plot
-ggplot() +
+# Plot with ribbons and thresholds
+wean_fig <- ggplot() +
+  # Observed data points
   geom_pointrange(
     data = wean_summ,
     aes(
-      x = mom_age_group,
+      x = mom_age,
       y = mean_success,
       ymin = mean_success - 1.96 * se_success,
-      ymax = mean_success + 1.96 * se_success
+      ymax = mean_success + 1.96 * se_success,
+      color = mom_age_group,
+      shape = mom_age_group
     ),
-    position = position_dodge(width = 0.5),
-    shape = 21,
-    fill = "#D5A6F6",
-    color = "#8E44AD",
-    size = 1.2,
-    show.legend = FALSE
+    show.legend = TRUE
   ) +
-  geom_line(
-    data = wean_pred_ci,
-    aes(x = x, y = predicted, group = 1),
-    color = "#6DD5B3",
-    linewidth = 1.5
-  ) +
+  # Confidence ribbons
   geom_ribbon(
     data = wean_pred_ci,
-    aes(x = x, ymin = conf.low, ymax = conf.high),
-    alpha = 0.2,
-    fill = "#6DD5B3"
+    aes(x = mom_age, ymin = conf.low, ymax = conf.high, fill = mom_age_group),
+    alpha = 0.2
   ) +
-  scale_x_discrete(name = "Mom Age Group") +
+  # Prediction lines
+  geom_line(
+    data = wean_pred_ci,
+    aes(x = mom_age, y = predicted, color = mom_age_group, linetype = mom_age_group),
+    linewidth = 1.2
+  ) +
+  # Vertical dashed lines for thresholds
+  geom_vline(xintercept = 4, linetype = "dashed", color = "#9B59B6") +
+  geom_vline(xintercept = 8, linetype = "dashed", color = "#9B59B6") +
   theme_minimal() +
   labs(
-    title = "Weaning Success by Mom Age Class",
-    y = "Probability of Weaning Success"
+    title = "Weaning Success vs Mom Age",
+    x = "Mother's Age (Years)",
+    y = "Predicted Probability of Weaning Success",
+    color = "Age Group",
+    fill = "Age Group",
+    linetype = "Age Group",
+    shape = "Age Group"
   ) +
-  theme(
-    axis.title = element_text(face = "bold", size = 13),
-    plot.title = element_text(face = "italic", hjust = 0.5, size = 16)
-  )
+  scale_color_manual(values = c("young" = "#D5A6F6", "prime" = "#6DD5B3", "old" = "#8E44AD")) +
+  scale_fill_manual(values = c("young" = "#D5A6F6", "prime" = "#6DD5B3", "old" = "#8E44AD"))
 
-
+print(wean_fig)
 ```
 
 Now for Question 2:
 
-How Does Mom's age group impact \# of male pups produced:
+How Does Mom's age impact \# of male pups produced:
 
 ```{r}
-#I have to join young and prime together since all the young pups are female
-otterdat2$mom_age_group2 <- fct_collapse(otterdat2$mom_age_group,
-                                         young = c("young", "prime"),
-                                         old = "old")
-#Create new model:
+# 1) Model: Binomial GLMM
 sex_mod <- glmer(
-  sex_bin ~ mom_age_group2 + (1 | Otterno),
+  sex_bin ~ mom_age + mom_age_group + (1 | Otterno) + (1 | year),
   data = otterdat2,
-  family = binomial,
+  family = binomial(link = "logit"),
   control = glmerControl(optimizer = "bobyqa")
 )
+print(summary(sex_mod))
 
-summary(sex_mod)
-
-#Again no significance
-sex_pred_ci <- ggpredict(sex_mod, terms = "mom_age_group2") %>% as.data.frame()
-
-sex_summ <- otterdat2 %>%
-  group_by(mom_age_group2) %>%
-  summarise(
-    mean_sex = mean(as.numeric(as.character(sex_bin)), na.rm = TRUE),
-    se_sex = sd(as.numeric(as.character(sex_bin)), na.rm = TRUE) / sqrt(n()),
-    .groups = "drop"
+# 2) Prediction grid across observed age range
+sex_grid <- tidyr::expand_grid(
+  mom_age = seq(min(otterdat2$mom_age, na.rm = TRUE),
+                max(otterdat2$mom_age, na.rm = TRUE),
+                by = 1)
+) %>%
+  mutate(
+    mom_age_group = case_when(
+      mom_age < 4 ~ "young",
+      mom_age >= 4 & mom_age <= 8 ~ "prime",
+      mom_age > 8 ~ "old",
+      TRUE ~ NA_character_
+    ),
+    mom_age_group = factor(mom_age_group, levels = c("young", "prime", "old"))
   )
 
-sex_summ <- sex_summ %>%
-  mutate(x_jitter = as.numeric(mom_age_group2) + 0.1)
-#And then plot:
-ggplot() +
-  # Observed means with 95% CI bars
+# 3) Predictions with 95% CI (response scale = probability)
+sex_pred_ci <- ggpredict(sex_mod, terms = c("mom_age [all]", "mom_age_group")) %>%
+  as.data.frame() %>%
+  mutate(
+    mom_age_group = factor(group, levels = c("young", "prime", "old")),
+    mom_age = as.numeric(x)
+  ) %>%
+  # Restrict predictions to valid ranges for each group
+  dplyr::filter(
+    (mom_age_group == "young" & mom_age < 4) |
+    (mom_age_group == "prime" & mom_age >= 4 & mom_age <= 8) |
+    (mom_age_group == "old" & mom_age > 8)
+  )
+
+# 4) Observed summaries to overlay
+sex_summ <- otterdat2 %>%
+  group_by(mom_age, mom_age_group) %>%
+  summarise(
+    mean_male = mean(sex_bin, na.rm = TRUE),
+    se_male   = sd(sex_bin,   na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  ) %>%
+  # small horizontal dodge by group for readability (matches other plot)
+  mutate(mom_age = mom_age + 0.2 * ifelse(mom_age_group == "prime", 0,
+                                   ifelse(mom_age_group == "young", -1, 1)))
+
+# 5) Plot (same styling, same thresholds at 4 and 8)
+sex_fig <- ggplot() +
   geom_pointrange(
     data = sex_summ,
-    aes(
-      x = mom_age_group2,
-      y = mean_sex,
-      ymin = mean_sex - 1.96 * se_sex,
-      ymax = mean_sex + 1.96 * se_sex
-    ),
-    shape = 21, fill = "#D5A6F6", color = "#8E44AD", size = 1.2
-  ) +
-  # Predicted probabilities and confidence ribbons
-  geom_line(
-    data = sex_pred_ci,
-    aes(x = x, y = predicted, group = 1),
-    color = "#6DD5B3",
-    size = 1.5
+    aes(x = mom_age, y = mean_male,
+        ymin = mean_male - 1.96 * se_male,
+        ymax = mean_male + 1.96 * se_male,
+        color = mom_age_group, shape = mom_age_group),
+    linewidth = 0.4
   ) +
   geom_ribbon(
     data = sex_pred_ci,
-    aes(x = x, ymin = conf.low, ymax = conf.high),
-    alpha = 0.2,
-    fill = "#6DD5B3"
+    aes(x = mom_age, ymin = conf.low, ymax = conf.high, fill = mom_age_group),
+    alpha = 0.2
   ) +
-  scale_x_discrete(name = "Mom Age Group") +
-  theme_minimal() +
+  geom_line(
+    data = sex_pred_ci,
+    aes(x = mom_age, y = predicted, color = mom_age_group, linetype = mom_age_group),
+    linewidth = 1.2
+  ) +
+  # geom_vline(xintercept = 4,  linetype = "dashed", color = "#9B59B6") +
+  geom_vline(xintercept = 8,  linetype = "dashed", color = "#9B59B6") +
+  theme_minimal(base_size = 12) +
   labs(
-    title = "Probability of Producing Male Pups",
-    subtitle = "Model Predictions with Observed Means",
-    y = "Probability of Male Pup"
+    title = "Probability of Producing Male Pups vs. Mother's Age",
+    x = "Mother's Age (years)",
+    y = "Predicted probability (male pup)",
+    color = "Age group", fill = "Age group", linetype = "Age group", shape = "Age group"
   ) +
-  theme(
-    axis.title = element_text(face = "bold", size = 13),
-    plot.title = element_text(face = "italic", hjust = 0.5, size = 16),
-    plot.subtitle = element_text(hjust = 0.5, size = 12, color = "#555555")
-  )
+  scale_color_manual(values = c(young = "#D5A6F6", prime = "#6DD5B3", old = "#8E44AD")) +
+  scale_fill_manual(values  = c(young = "#D5A6F6", prime = "#6DD5B3", old = "#8E44AD")) +
+  coord_cartesian(ylim = c(0, 1))
+
+print(sex_fig)
 ```
 
 Now our final question:
 
-How do both of these factors interacting with each other impact weaning success
+How does weaning period change with mom's age
 
 ```{r}
-otterdat2 <- otterdat2 %>%
-  mutate(
-    mom_age_group2 = factor(mom_age_group2, levels = c("young", "old")),
-    sex_bin = factor(sex_bin, levels = c(0, 1))  # 0 = female, 1 = male, or vice versa as you set
-  )
-#Make sex_bin a factor:
-otterdat2 <- otterdat2 %>%
-  filter(!is.na(sex_bin)) %>%        # remove NAs
-  filter(sex_bin %in% c(0, 1)) %>%   # keep only valid levels
-  mutate(sex_bin = factor(sex_bin, levels = c(0, 1)))
-
-#Create model for interaction:
-int_mod <- glmer(
-  wean_success ~ mom_age_group2 * sex_bin + (1 | Otterno) + (1 | year),
+# 1) Model: Negative Binomial GLMM (handles overdispersion)
+wean_days_mod <- glmer.nb(
+  wean_days ~ mom_age + mom_age_group + (1 | Otterno) + (1 | year),
   data = otterdat2,
-  family = binomial,
   control = glmerControl(optimizer = "bobyqa")
 )
-summary(int_mod)
+print(summary(wean_days_mod))
 
-int_pred_ci <- ggpredict(int_mod, terms = c("mom_age_group2", "sex_bin")) %>% as.data.frame()
+# 1a) Quick overdispersion check (should be ~1; >>1 indicates overdispersion)
+overdisp_fun <- function(model) {
+  rdf <- df.residual(model)
+  rp  <- residuals(model, type = "pearson")
+  Pearson.chisq <- sum(rp^2)
+  c(chisq = Pearson.chisq, ratio = Pearson.chisq / rdf, rdf = rdf)
+}
+print(overdisp_fun(wean_days_mod))
 
-
-int_summ <- otterdat2 %>%
-  group_by(mom_age_group2, sex_bin) %>%
-  summarise(
-    mean_success = mean(wean_success, na.rm = TRUE),
-    se_success = sd(wean_success, na.rm = TRUE) / sqrt(n()),
-    .groups = "drop"
+# 2) Prediction grid across observed age range
+wean_days_grid <- tidyr::expand_grid(
+  mom_age = seq(min(otterdat2$mom_age, na.rm = TRUE),
+                max(otterdat2$mom_age, na.rm = TRUE), by = 1)
+) %>%
+  mutate(
+    mom_age_group = case_when(
+      mom_age < 4 ~ "young",
+      mom_age >= 4 & mom_age <= 8 ~ "prime",
+      mom_age > 8 ~ "old",
+      TRUE ~ NA_character_
+    ),
+    mom_age_group = factor(mom_age_group, levels = c("young", "prime", "old"))
   )
 
+# 3) Predictions with 95% CI (on response scale = days)
+wean_days_pred_ci <- ggpredict(
+  wean_days_mod,
+  terms = c("mom_age [all]", "mom_age_group")
+) %>%
+  as.data.frame() %>%
+  mutate(
+    mom_age_group = factor(group, levels = c("young", "prime", "old")),
+    mom_age = as.numeric(x)
+  ) %>%
+  filter(
+    (mom_age_group == "young" & mom_age < 4) |
+    (mom_age_group == "prime" & mom_age >= 4 & mom_age <= 8) |
+    (mom_age_group == "old" & mom_age > 8)
+  )
 
-#Final plot!
-ggplot() +
-  # Observed points with error bars
+# 4) Observed summaries for overlay points/error bars
+wean_days_summ <- otterdat2 %>%
+  group_by(mom_age, mom_age_group) %>%
+  summarise(
+    mean_days = mean(wean_days, na.rm = TRUE),
+    se_days   = sd(wean_days,  na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  ) %>%
+  mutate(mom_age = mom_age + 0.2 * ifelse(mom_age_group == "prime", 0,
+                                   ifelse(mom_age_group == "young", -1, 1)))
+
+# 5) Plot (predicted lines should align much better than Poisson)
+wean_days_fig <- ggplot() +
   geom_pointrange(
-    data = int_summ,
-    aes(
-      x = mom_age_group2,
-      y = mean_success,
-      ymin = mean_success - 1.96 * se_success,
-      ymax = mean_success + 1.96 * se_success,
-      fill = factor(sex_bin),
-      color = factor(sex_bin)
-    ),
-    position = position_dodge(width = 0.5),
-    shape = 21,
-    size = 1.2
+    data = wean_days_summ,
+    aes(x = mom_age, y = mean_days,
+        ymin = mean_days - 1.96 * se_days,
+        ymax = mean_days + 1.96 * se_days,
+        color = mom_age_group, shape = mom_age_group),
+    linewidth = 0.4
   ) +
-  # Predicted lines
-  geom_line(
-    data = int_pred_ci,
-    aes(x = x, y = predicted, group = group, color = group),
-    position = position_dodge(width = 0.5),
-    size = 1.5
-  ) +
-  # Confidence ribbons
   geom_ribbon(
-    data = int_pred_ci,
-    aes(x = x, ymin = conf.low, ymax = conf.high, group = group, fill = group),
-    alpha = 0.2,
-    position = position_dodge(width = 0.5)
+    data = wean_days_pred_ci,
+    aes(x = mom_age, ymin = conf.low, ymax = conf.high, fill = mom_age_group),
+    alpha = 0.2
   ) +
-  scale_x_discrete(name = "Mom Age Group") +
-  scale_color_manual(name = "Pup Sex", values = c("#D5A6F6", "#1B9E77"), labels = c("Female", "Male")) +
-  scale_fill_manual(name = "Pup Sex", values = c("#D5A6F6", "#1B9E77"), labels = c("Female", "Male")) +
-  theme_minimal() +
+  geom_line(
+    data = wean_days_pred_ci,
+    aes(x = mom_age, y = predicted, color = mom_age_group, linetype = mom_age_group),
+    linewidth = 1.2
+  ) +
+  geom_vline(xintercept = 4, linetype = "dashed", color = "#9B59B6") +
+  geom_vline(xintercept = 8, linetype = "dashed", color = "#9B59B6") +
+  theme_minimal(base_size = 12) +
   labs(
-    title = "Weaning Success across Age and Sex",
-    y = "Probability of Weaning Success"
+    title = "Weaning Duration vs. Mother's Age (Sea Otters)",
+    subtitle = "Predicted weaning days from glmer.nb (Negative Binomial)",
+    x = "Mother's Age (years)",
+    y = "Weaning period (days)",
+    color = "Age group", fill = "Age group", linetype = "Age group", shape = "Age group"
   ) +
-  theme(
-    axis.title = element_text(face = "bold", size = 13),
-    plot.title = element_text(face = "italic", hjust = 0.5, size = 16)
-    )
-  
+  scale_color_manual(values = c(young = "#D5A6F6", prime = "#6DD5B3", old = "#8E44AD")) +
+  scale_fill_manual(values  = c(young = "#D5A6F6", prime = "#6DD5B3", old = "#8E44AD")) +
+  coord_cartesian(ylim = c(0, NA))
+
+print(wean_days_fig)
 ```
